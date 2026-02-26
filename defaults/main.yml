@@ -1,1 +1,8 @@
+# Nginx configuration
+nginx_server_name: "{{ ansible_facts['fqdn'] | default('monica.local') }}"
 
+# Monica repository settings
+monica_repo: "https://github.com/monicahq/monica.git"
+monica_version: "main"
+monica_dest: "/srv/monicahq"
+monica_user: "www-data"
