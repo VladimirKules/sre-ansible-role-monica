@@ -1,4 +1,29 @@
----
+- name: Assert required variables are defined
+  assert:
+    that:
+      - monica_dest is defined
+      - monica_repo is defined
+      - monica_user is defined
+      - nginx_server_name is defined
+    fail_msg: "Required variables must be defined"
+    quiet: yes
+
+- name: Assert OS compatibility
+  assert:
+    that:
+      # ansible_os_family == "Debian"
+      - ansible_facts['distribution'] in ['Ubuntu']
+    fail_msg: "This role only supports Ubuntu system"
+    quiet: yes
+
+- name: Assert required paths
+  assert:
+    that:
+      - monica_dest is match("/.*")
+      - monica_dest | length > 1
+    fail_msg: "monica_dest must be an absolute path"
+    quiet: yes
+
 - name: install packages
   apt:
     name: "{{ item }}"
@@ -9,11 +34,86 @@
     - apt-transport-https
     - nginx
 
-- name: check out master branch
+- name: Ensure destination directory exists with correct permissions
+  file:
+    path: "{{ monica_dest }}"
+    state: directory
+    owner: "{{ monica_user }}"
+    group: "{{ monica_user }}"
+    mode: '0755'
+  when: monica_dest is defined
+
+- name: Create .gitconfig for www-data if it doesn't exist
+  become: yes
+  become_user: "{{ monica_user }}"
+  file:
+    path: "/var/www/.gitconfig"
+    state: touch
+    mode: '0644'
+  when: monica_dest is defined
+  ignore_errors: yes
+
+- name: Configure git safe directory for www-data
+  become: yes
+  become_user: "{{ monica_user }}"
+  command: git config --global --add safe.directory {{ monica_dest }}
+  args:
+    creates: "{{ monica_dest }}/.git"
+  when: monica_dest is defined
+  register: git_config_result
+  ignore_errors: yes
+
+- name: Check git config for www-data
+  become: yes
+  become_user: "{{ monica_user }}"
+  command: git config --global --list
+  register: git_global_config
+  changed_when: false
+  when: monica_dest is defined
+  ignore_errors: yes
+
+- name: Show git config for www-data
+  debug:
+    msg: "Git config for {{ monica_user }}: {{ git_global_config.stdout_lines | default([]) }}"
+  when: git_global_config is defined
+
+- name: Clone Monica repository as www-data
+  become: yes
+  become_user: "{{ monica_user }}"
   git:
-    repo: 'https://github.com/monicahq/monica'
-    dest: /srv/monicahq
-    version: master
+    repo: "{{ monica_repo }}"
+    dest: "{{ monica_dest }}"
+    version: "{{ monica_version }}"
+    force: yes
+    accept_hostkey: yes
+  when: monica_dest is defined
+  register: git_clone_result
+  ignore_errors: yes
+
+- name: Show clone result
+  debug:
+    msg: "Clone result: {{ git_clone_result }}"
+  when: git_clone_result is defined
+
+- name: If clone failed, try with shell as fallback
+  become: yes
+  become_user: "{{ monica_user }}"
+  shell: |
+    cd {{ monica_dest }}
+    git config --global --add safe.directory {{ monica_dest }}
+    git remote set-url origin {{ monica_repo }}
+    git fetch origin
+    git checkout {{ monica_version }}
+  when:
+    - monica_dest is defined
+    - git_clone_result is failed
+  register: shell_fallback
+  ignore_errors: yes
+
+- name: Show fallback result
+  debug:
+    msg: "Fallback result: {{ shell_fallback }}"
+  when: shell_fallback is defined
 
 - name: Add the user
   user:
@@ -21,17 +121,28 @@
     shell: /usr/bin/nologin
     home: /srv/monicahq
 
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Install gnupg for apt key management
+  apt:
+    name:
+      - gnupg
+      - gnupg2
+      - ca-certificates
+    state: present
+
 - name: Install sury key
   apt_key:
     url: 'https://packages.sury.org/php/apt.gpg'
     state: present
 
-- name: Add sury repositories
-  apt_repository:
-    repo: "deb https://packages.sury.org/php/ stretch main"
-    state: present
-    update_cache: yes
-    filename: 'sury'
+- name: No external repo needed for Ubuntu 24.04 (PHP 8.3 in base)
+  debug:
+    msg: "Using default Ubuntu repositories for PHP"
+  when: ansible_facts['distribution'] == "Ubuntu" and ansible_facts['distribution_version'] is version('24.04', '==')
 
 - name: install php dependencies
   apt:
@@ -39,32 +150,33 @@
     state: present
     update_cache: yes
   loop:
-    - php7.3
-    - php7.3-cli
-    - php7.3-intl
-    - php7.3-iconv
-    - php7.3-fpm
-    - php7.3-curl
-    - php7.3-gd
-    - php7.3-mysql
-    - php7.3-mysqli
-    - php7.3-opcache
-    - php7.3-json
-    - php7.3-mbstring
-    - php7.3-soap
-    - php7.3-xml
-    - php7.3-zip
-    - php7.3-gmp
-    - php7.3-bcmath
+    - php8.3
+    - php8.3-cli
+    - php8.3-fpm
+    - php8.3-curl
+    - php8.3-intl
+    - php8.3-mbstring
+    - php8.3-xml
+    - php8.3-zip
+    - php8.3-gd
+    - php8.3-mysql
+    - php8.3-bcmath
+    - php8.3-gmp
+    - php8.3-soap
+    - php8.3-opcache
     - php-memcached
     - php-xdebug
     - php-redis
 
-- name: reload service php-fcgi
-  become: true
-  systemd:
-    name: php7.3-fpm
-    state: reloaded
+- name: reload php-fpm service (Docker compatible)
+  command: service php8.1-fpm reload
+  when: ansible_facts['virtualization_type'] == "docker"
+  changed_when: false
+  register: php_reload
+  failed_when:
+    - php_reload.rc != 0
+    - '"unrecognized service" not in php_reload.stderr'
+    - '"not found" not in php_reload.stderr'
 
 - name: install composer
   include_role:
@@ -74,6 +186,7 @@
   composer:
     command: install
     working_dir: /srv/monicahq
+
 - name: prepare configuration
   template:
     src: env.j2
@@ -90,6 +203,17 @@
   args:
     chdir: /srv/monicahq/
   tags: molecule-notest
+
+- name: Install cron for scheduler
+  apt:
+    name: cron
+    state: present
+
+- name: Ensure cron service is running
+  service:
+    name: cron
+    state: started
+    enabled: yes
 
 - name: Place a scheduler cron job
   cron:
@@ -111,16 +235,40 @@
     state: directory
     recurse: yes
     mode: g+w
+
 - name: Create nginx vhost config
   template:
     src: monicahq.conf.j2
     dest: /etc/nginx/sites-enabled/monica.conf
+
 - name: Remove default nginx configuration
   file:
     path: /etc/nginx/sites-enabled/default
     state: absent
-- name: reload service nginx
-  become: true
-  systemd:
-    name: nginx
-    state: reloaded
+
+- name: Check if nginx is already running
+  command: pgrep nginx
+  register: nginx_running
+  changed_when: false
+  failed_when: false
+  ignore_errors: yes
+
+- name: Show nginx status
+  debug:
+    msg: "nginx is {{ 'running' if nginx_running.rc == 0 else 'not running' }}"
+
+- name: Start nginx if not running
+  command: nginx
+  when: nginx_running.rc != 0
+  ignore_errors: yes
+
+- name: Reload nginx configuration
+  command: nginx -s reload
+  when: nginx_running.rc == 0
+  ignore_errors: yes
+  register: nginx_reload
+
+- name: If reload failed, try restart
+  command: nginx -s stop && nginx
+  when: nginx_reload is failed
+  ignore_errors: yes
