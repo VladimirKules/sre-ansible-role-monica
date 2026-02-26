@@ -1,35 +1,58 @@
+---
+# Dependency management (download roles/collections)
 dependency:
   name: galaxy
-driver:
-  name: docker
-lint:
-  name: yamllint
   options:
-    config-file: molecule/default/yamllint.yml
-platforms:
-  - name: ansible-role-monica-test
-    image: "geerlingguy/docker-debian9-ansible"
-    command: ${MOLECULE_COMMAND:-""}
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:ro
-    privileged: true
-    pre_build_image: true
-provisioner:
-  name: ansible
-  lint:
-    name: ansible-lint
-    options:
-      exclude:
-        - molecule/default/playbook.yml
-      x:
-        - 204  # Lines should be no longer than 160 chars
-        - 403  # Package installs should not use latest
-        - 502  # All tasks should be named
+    ignore-certs: false
+    ignore-errors: false
+    role-file: requirements.yml
+    requirements-file: requirements.yml
+
+
+ansible:
+  cfg:
+    defaults:
+      host_key_checking: false
+      verbosity: 1
+    ssh_connection:
+      pipelining: true
+  env:
+    ANSIBLE_FORCE_COLOR: "1"
+    ANSIBLE_LOAD_CALLBACK_PLUGINS: "1"
+
+  executor:
+    backend: ansible-playbook
+    args:
+      ansible_playbook:
+        - --diff
+        - --force-handlers
+        - --inventory=/path/to/inventory.yml
+      ansible_navigator:
+        - --mode stdout
+        - --pull-policy missing
+        - --execution-environment-image ghcr.io/ansible/community-ansible-dev-tools:latest
+
   playbooks:
-    converge: ${MOLECULE_PLAYBOOK:-playbook.yml}
+    create: create.yml
+    converge: converge.yml
+    destroy: destroy.yml
+    cleanup: cleanup.yml
+    prepare: prepare.yml
+    side_effect: side_effect.yml
+    verify: verify.yml
+
 scenario:
   name: default
-verifier:
-  name: testinfra
-  lint:
-    name: flake8
+  test_sequence:
+    - dependency
+    - cleanup
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - side_effect
+    - verify
+    - cleanup
+    - destroy

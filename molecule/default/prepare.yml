@@ -1,0 +1,49 @@
+---
+- name: Prepare
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Update apt cache
+      raw: apt-get update
+      changed_when: false
+
+    - name: Install Python
+      raw: apt-get install -y python3 python3-apt python3-pip
+      changed_when: false
+
+    - name: Create ansible temp directory
+      file:
+        path: /tmp/ansible-student
+        state: directory
+        mode: '1777'
+      changed_when: false
+
+    - name: Verify Python installation
+      raw: python3 --version
+      register: python_version
+      changed_when: false
+
+    - name: Show Python version
+      debug:
+        msg: "Python version: {{ python_version.stdout }}"
+
+    - name: Ensure www-data has proper home directory
+      user:
+        name: www-data
+        home: /var/www
+        create_home: yes
+        shell: /bin/bash
+
+    - name: Set proper permissions for /var/www
+      file:
+        path: /var/www
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Create .gitconfig with safe directory
+      become: yes
+      become_user: www-data
+      command: git config --global --add safe.directory {{ monica_dest | default('/srv/monicahq') }}
+      ignore_errors: yes
